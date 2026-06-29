@@ -6,9 +6,10 @@ MINIMAL AI AGENT LOOP
 1. You give it a job posting and ask it to tailor your resume/cover letter.
 2. The AI model (Claude) reads your request and decides: "I need to read the
    user's resume file first before I can do this."
-3. Our code notices the AI wants to use a "tool" (in this case, a function
-   that reads a file), so it actually reads the file, and sends the contents
-   back to the AI.
+3. Our code notices the AI wants to use a "tool" and actually runs it - the
+   tool's code lives in its own file under the tools/ folder, not in this
+   file (see tools/read_file.py and tools/__init__.py) - and sends the
+   result back to the AI.
 4. The AI now has the resume text, and uses it to write a tailored draft.
 5. Our code notices the AI is NOT asking for any more tools - it's done - so
    we print its final answer.
@@ -16,6 +17,10 @@ MINIMAL AI AGENT LOOP
 This back-and-forth (AI asks for a tool -> our code runs it -> AI gets the
 result -> repeat) is called "the agent loop". It's the heart of what makes
 something an "AI agent" instead of just a single question-and-answer.
+
+This file only contains the loop itself - it has no idea how many tools
+exist or what they do. Every tool is its own plug-and-play file inside
+tools/. See CLAUDE.md for the blueprint to follow when adding a new one.
 
 --------------------------------------------------------------------------------
 SETUP (do this once):
@@ -45,7 +50,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import anthropic # pyright: ignore[reportMissingImports]
-from pypdf import PdfReader
+
+from tools import TOOLS, execute_tool
 
 # This creates a "client" - think of it as a phone you can use to call
 # Claude. Behind the scenes, it automatically looks for your API key in
@@ -56,87 +62,16 @@ MODEL = "claude-haiku-4-5-20251001"
 
 
 # ==============================================================================
-# STEP 1: DESCRIBE OUR TOOL TO THE MODEL
+# TOOLS
 # ==============================================================================
-# Claude can't read your files by itself - it can only read and write text.
-# So if we want it to be able to "use a tool", we have to:
-#   (a) describe the tool to it in a very specific format (this section), and
-#   (b) actually write the Python code that does the work (next section).
+# TOOLS (the list Claude reads to know what it's allowed to use) and
+# execute_tool() (which actually runs a tool when Claude asks for one) are
+# no longer defined here. They're auto-collected from every file inside the
+# tools/ folder - see tools/__init__.py and tools/read_file.py.
 #
-# TOOLS is a LIST (the square brackets [ ]) containing ONE tool description.
-# Each tool description is a DICTIONARY (the curly braces { }) - a dictionary
-# is just a collection of "key: value" pairs, a label and its contents.
-#
-# Claude will read this description and decide WHEN it wants to call this
-# tool and WHAT arguments to call it with. Our code is the one that actually
-# runs it - Claude only ever "asks".
-TOOLS = [
-    {
-        # The name Claude will use to refer to this tool.
-        "name": "read_file",
-
-        # A plain-English explanation of what the tool does and when to use
-        # it. This is the ONLY information Claude has about this tool - the
-        # better this description is, the better Claude will use the tool.
-        "description": (
-            "Read the full text contents of a local PDF file by name. Use "
-            "this to load the user's base resume or base cover letter "
-            "before tailoring them to a specific job posting."
-        ),
-
-        # This describes what ARGUMENTS the tool needs, using a standard
-        # format called "JSON Schema". Don't worry about memorizing this -
-        # just know that it says: "this tool needs one argument, called
-        # 'filename', and it must be text (a string)".
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "filename": {
-                    "type": "string",
-                    "description": "One of: base_resume.pdf, base_cover_letter.pdf",
-                }
-            },
-            "required": ["filename"],
-        },
-    }
-]
-
-
-# ==============================================================================
-# STEP 2: WRITE THE ACTUAL CODE THAT THE TOOL RUNS
-# ==============================================================================
-# Claude never sees this code and never runs it directly. When Claude asks
-# for the "read_file" tool, OUR code (below) is what actually opens the file.
-
-def read_file(filename):
-    # "try" means: attempt to do the following, and if something goes wrong,
-    # don't crash the whole program - instead, jump to the "except" part.
-    try:
-        # PdfReader opens the PDF and gives us access to its pages.
-        reader = PdfReader(filename)
-        # Each page's text comes out separately, so we extract it page
-        # by page and glue the pieces together with newlines in between.
-        return "\n".join(page.extract_text() for page in reader.pages)
-    except FileNotFoundError:
-        # This only runs if the file genuinely doesn't exist. Instead of
-        # crashing, we return an error message AS TEXT - because we want
-        # to feed this back to Claude later, and Claude only understands text.
-        return f"Error: {filename} not found in the current folder."
-
-
-def execute_tool(name, tool_input):
-    # This function's job is simple: look at WHICH tool Claude asked for
-    # (there's only one in this script, but you'll add more later), and
-    # call the matching Python function.
-    #
-    # tool_input is a dictionary, e.g. {"filename": "base_resume.txt"}.
-    # tool_input["filename"] grabs the value stored under the "filename" key.
-    if name == "read_file":
-        return read_file(tool_input["filename"])
-
-    # If Claude somehow asks for a tool we don't recognize, say so instead
-    # of crashing.
-    return f"Error: unknown tool '{name}'"
+# This means adding a new tool never requires editing this file: drop a new
+# tools/your_tool.py with a SPEC and a run() function, and it shows up here
+# automatically.
 
 
 # ==============================================================================
