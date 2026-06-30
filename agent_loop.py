@@ -116,7 +116,10 @@ def run_agent(user_message):
                 "letter section labels followed by a colon, and a simple "
                 "dash (-) for list items.\n\n"
                 "Before doing anything else, read the user's base resume and "
-                "base cover letter using the read_file tool.\n\n"
+                "base cover letter using the read_file tool. If the user "
+                "provided a job posting URL instead of pasted text, also use "
+                "the fetch_job_posting tool to retrieve the job description "
+                "before proceeding.\n\n"
                 "Then structure your response in exactly this order:\n\n"
                 "MATCH SCORE: a score out of 100 plus a one-word label, "
                 "using this rubric -\n"
@@ -211,26 +214,38 @@ def run_agent(user_message):
 # "this is where the program starts."
 if __name__ == "__main__":
 
-    # Ask for the job posting each time the script runs. We use sys.stdin.read() instead of the
-    # simpler input() because input() only grabs ONE line - if you paste a
-    # whole job posting (many lines, maybe with stray text from the
-    # webpage), input() would cut it off after the first line.
+    # Ask for a job posting URL or pasted text. We use sys.stdin.read() instead
+    # of the simpler input() because input() only grabs ONE line - if you paste
+    # a whole job posting (many lines), input() would cut it off after the first.
     #
-    # sys.stdin.read() keeps reading everything you paste/type until it
-    # sees an "EOF" (end-of-file) signal, which you send manually by
-    # pressing Ctrl+D on Mac/Linux (or Ctrl+Z then Enter on Windows) once
-    # you're done pasting. It's fine if the pasted text is messy - extra
-    # blank lines, "Apply Now" buttons, nav menu text, etc. - Claude is
-    # perfectly capable of ignoring the noise and finding the actual job
-    # description within it.
-    print("Paste the job posting below. When you're done, press Ctrl+D (Mac/Linux) or Ctrl+Z then Enter (Windows):")
-    JOB_POSTING = sys.stdin.read()
+    # sys.stdin.read() keeps reading everything you paste/type until it sees an
+    # "EOF" signal, which you send by pressing Ctrl+D on Mac/Linux (or Ctrl+Z
+    # then Enter on Windows) once you're done.
+    #
+    # Two ways to provide the job posting:
+    #   - Paste a URL (e.g. a LinkedIn job link) and press Ctrl+D. Claude will
+    #     call the fetch_job_posting tool to retrieve the description for you.
+    #   - Paste the full job description text directly and press Ctrl+D. Claude
+    #     will use it as-is. It's fine if the pasted text is messy - extra blank
+    #     lines, "Apply Now" buttons, nav text, etc. - Claude ignores the noise.
+    print("Enter a job posting URL, or paste the full job description.")
+    print("Press Ctrl+D when done (Mac/Linux) or Ctrl+Z then Enter (Windows):")
+    user_input = sys.stdin.read().strip()
 
-    # We build the instruction we'll send to Claude.
-    prompt = f"""
+    # Detect whether the user gave us a URL or raw text, and build the
+    # appropriate prompt so Claude knows what to do with the input.
+    if user_input.startswith(("http://", "https://")):
+        prompt = f"""
+Fetch the job posting from this URL and then evaluate my fit and tailor my
+application materials for this specific role, exactly as instructed.
+
+URL: {user_input}
+"""
+    else:
+        prompt = f"""
 Here is a job posting:
 
-{JOB_POSTING}
+{user_input}
 
 Evaluate my fit and tailor my application materials for this specific role,
 exactly as instructed.
