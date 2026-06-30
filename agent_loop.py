@@ -21,29 +21,11 @@ something an "AI agent" instead of just a single question-and-answer.
 This file only contains the loop itself - it has no idea how many tools
 exist or what they do. Every tool is its own plug-and-play file inside
 tools/. See CLAUDE.md for the blueprint to follow when adding a new one.
-
---------------------------------------------------------------------------------
-SETUP (do this once):
-
-    pip3 install anthropic pypdf python-dotenv
-
-    Copy .env.example to .env and put your real API key in there:
-        cp .env.example .env
-        (then edit .env in a text editor and paste your key)
-
-Then, in the SAME FOLDER as this script, put your resume and cover letter
-as PDFs:
-    base_resume.pdf          <- your real resume in here
-    base_cover_letter.pdf    <- your real cover letter in here
-
-Finally, paste a real job description into the JOB_POSTING variable near
-the bottom of this file, and run:
-
-    python agent_loop.py
 ================================================================================
 """
 
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -62,34 +44,99 @@ MODEL = "claude-haiku-4-5-20251001"
 
 
 # ==============================================================================
-# TOOLS
+# SYSTEM PROMPTS
 # ==============================================================================
-# TOOLS (the list Claude reads to know what it's allowed to use) and
-# execute_tool() (which actually runs a tool when Claude asks for one) are
-# no longer defined here. They're auto-collected from every file inside the
-# tools/ folder - see tools/__init__.py and tools/read_file.py.
+# The agent runs in two phases. Each phase gets its own system prompt so
+# Claude knows exactly what to output and when to stop.
 #
-# This means adding a new tool never requires editing this file: drop a new
-# tools/your_tool.py with a SPEC and a run() function, and it shows up here
-# automatically.
+# Phase 1: read the files, score the fit, list key gaps.
+# Phase 2: using the context already in the conversation, write the resume
+#          adjustments and tailored cover letter. No file reads needed.
+
+_SYSTEM_BASE = (
+    "You are a careful career assistant helping evaluate fit and "
+    "tailor application materials. The user reads your output in "
+    "a plain terminal with no markdown rendering. Format your "
+    "entire response as plain text only: do not use bold/italic "
+    "markers (**, *, _), do not use markdown headers (#), and no "
+    "emojis. Use plain capital-letter section labels followed by "
+    "a colon, and a simple dash (-) for list items.\n\n"
+)
+
+SYSTEM_PHASE_1 = _SYSTEM_BASE + (
+    "Before doing anything else, read the user's base resume and "
+    "base cover letter using the read_file tool. If the user "
+    "provided a job posting URL instead of pasted text, also use "
+    "the fetch_job_posting tool to retrieve the job description "
+    "before proceeding.\n\n"
+    "Then output exactly two sections in this order:\n\n"
+    "MATCH SCORE: one line with the total score out of 100 and "
+    "its label (see rubric below). Immediately after that line, "
+    "print this exact table using pipe characters - fill in the "
+    "Score column with the points you awarded in each category:\n\n"
+    "CATEGORY                          | POSSIBLE | SCORE\n"
+    "----------------------------------|----------|------\n"
+    "Required qualifications           |       50 |    ??\n"
+    "Preferred qualifications          |       20 |    ??\n"
+    "Seniority/experience level fit    |       15 |    ??\n"
+    "Domain/industry alignment         |       15 |    ??\n"
+    "----------------------------------|----------|------\n"
+    "TOTAL                             |      100 |    ??\n\n"
+    "Rubric for the scores above:\n"
+    "- Required qualifications met (up to 50 points): how many "
+    "of the posting's must-have requirements the resume gives "
+    "clear evidence for\n"
+    "- Preferred qualifications met (up to 20 points): nice-to-"
+    "have skills or experience mentioned in the posting\n"
+    "- Seniority/experience level fit (up to 15 points): does "
+    "the candidate's years of experience and past titles match "
+    "the level implied by the posting (junior/mid/senior/lead)\n"
+    "- Domain/industry alignment (up to 15 points): overlap "
+    "between the candidate's industry background and the "
+    "posting's domain\n"
+    "Label the total as: 80-100 Strong match, 60-79 Good match, "
+    "40-59 Stretch, below 40 Not aligned.\n\n"
+    "KEY GAPS: a short list of the most important requirements "
+    "the resume does not clearly demonstrate. Write 'None' if "
+    "there aren't any meaningful gaps."
+)
+
+SYSTEM_PHASE_2 = _SYSTEM_BASE + (
+    "The conversation history already contains the user's resume, "
+    "cover letter, and job posting - do not call any tools.\n\n"
+    "Output exactly two sections in this order:\n\n"
+    "RESUME ADJUSTMENTS: specific, concrete edits worth making "
+    "to the resume for this role. Write 'No changes needed' if "
+    "there genuinely aren't any.\n\n"
+    "TAILORED COVER LETTER: the full text of a cover letter "
+    "adapted to this specific role - keep the underlying facts "
+    "from the base cover letter the same, just re-emphasize and "
+    "reword for relevance to this posting."
+)
 
 
 # ==============================================================================
-# STEP 3: THE AGENT LOOP ITSELF
+# THE AGENT LOOP
 # ==============================================================================
 # This is the function that does the back-and-forth described at the very
 # top of this file. Read the comments inside it slowly - this is the part
 # that actually matters most.
+#
+# It now accepts two optional parameters:
+#   system   - the system prompt to use for this run
+#   messages - existing conversation history to continue from (used in phase 2
+#              so Claude already has the resume/job posting in context and
+#              doesn't need to re-read any files)
 
-def run_agent(user_message):
-    # "messages" is the running history of the conversation: what the user
-    # said, what Claude said, what tool results came back, etc. We start it
-    # off with just the user's first message.
-    #
-    # Every single time we talk to Claude, we have to send this ENTIRE
-    # history again - Claude itself does not remember anything between
-    # calls. Our code is responsible for remembering.
-    messages = [{"role": "user", "content": user_message}]
+def run_agent(user_message, system, messages=None):
+    # Start a fresh conversation, or continue an existing one.
+    if messages is None:
+        messages = [{"role": "user", "content": user_message}]
+    else:
+        # Append the new user turn to the history we received.
+        messages = messages + [{"role": "user", "content": user_message}]
+
+    start_time = time.time()
 
     # "while True:" starts a loop that repeats FOREVER, until something
     # inside it explicitly stops it (in our case, a "return" statement).
@@ -97,56 +144,18 @@ def run_agent(user_message):
     # again until it has nothing left to do.
     while True:
 
+        print("Thinking...", flush=True)
+
         # This is the actual "phone call" to Claude. We send:
         #   - which model to use
         #   - max_tokens: the longest answer we'll allow it to write
         #   - system: instructions about HOW it should behave overall
-        #   - tools: the tool description from Step 1
+        #   - tools: the tool descriptions auto-collected from tools/
         #   - messages: the entire conversation so far
         response = client.messages.create(
             model=MODEL,
-            max_tokens=2000,
-            system=(
-                "You are a careful career assistant helping evaluate fit and "
-                "tailor application materials. The user reads your output in "
-                "a plain terminal with no markdown rendering. Format your "
-                "entire response as plain text only: do not use bold/italic "
-                "markers (**, *, _), do not use markdown headers (#), do not "
-                "use tables or pipe characters for layout, and no emojis. Use plain capital-"
-                "letter section labels followed by a colon, and a simple "
-                "dash (-) for list items.\n\n"
-                "Before doing anything else, read the user's base resume and "
-                "base cover letter using the read_file tool. If the user "
-                "provided a job posting URL instead of pasted text, also use "
-                "the fetch_job_posting tool to retrieve the job description "
-                "before proceeding.\n\n"
-                "Then structure your response in exactly this order:\n\n"
-                "MATCH SCORE: a score out of 100 plus a one-word label, "
-                "using this rubric -\n"
-                "- Required qualifications met (up to 50 points): how many "
-                "of the posting's must-have requirements the resume gives "
-                "clear evidence for\n"
-                "- Preferred qualifications met (up to 20 points): nice-to-"
-                "have skills or experience mentioned in the posting\n"
-                "- Seniority/experience level fit (up to 15 points): does "
-                "the candidate's years of experience and past titles match "
-                "the level implied by the posting (junior/mid/senior/lead)\n"
-                "- Domain/industry alignment (up to 15 points): overlap "
-                "between the candidate's industry background and the "
-                "posting's domain\n"
-                "Label the total as: 80-100 Strong match, 60-79 Good match, "
-                "40-59 Stretch, below 40 Not aligned.\n\n"
-                "KEY GAPS: a short list of the most important requirements "
-                "the resume does not clearly demonstrate. Write 'None' if "
-                "there aren't any meaningful gaps.\n\n"
-                "RESUME ADJUSTMENTS: specific, concrete edits worth making "
-                "to the resume for this role. Write 'No changes needed' if "
-                "there genuinely aren't any.\n\n"
-                "TAILORED COVER LETTER: the full text of a cover letter "
-                "adapted to this specific role - keep the underlying facts "
-                "from the base cover letter the same, just re-emphasize and "
-                "reword for relevance to this posting."
-            ),
+            max_tokens=4000,
+            system=system,
             tools=TOOLS,
             messages=messages,
         )
@@ -167,11 +176,15 @@ def run_agent(user_message):
             # run_agent(...). We build it up piece by piece in a loop,
             # since response.content can technically contain more than
             # one block.
+            #
+            # We also return the messages history so the caller can pass it
+            # into a follow-up run_agent call (phase 2) without losing context.
+            elapsed = time.time() - start_time
             final_text = ""
             for block in response.content:
                 if block.type == "text":
-                    final_text = final_text + block.text
-            return final_text  # this exits the while loop AND the function
+                    final_text += block.text
+            return elapsed, final_text, messages  # exits the while loop AND the function
 
         # If we reach this point, Claude asked for one or more tools.
         # We need to run each one and collect the results.
@@ -183,6 +196,7 @@ def run_agent(user_message):
                 # block.name is which tool it wants (e.g. "read_file").
                 # block.input is the arguments dictionary it wants to use,
                 # e.g. {"filename": "base_resume.txt"}.
+                print(f"Using tool: {block.name}...", flush=True)
                 result = execute_tool(block.name, block.input)
 
                 # We package the result in the exact format Claude expects,
@@ -206,7 +220,35 @@ def run_agent(user_message):
 
 
 # ==============================================================================
-# STEP 4: ACTUALLY RUN IT
+# TERMINAL INPUT HELPERS
+# ==============================================================================
+# sys.stdin.read() exhausts stdin on the first Ctrl+D, so any subsequent
+# reads (yes/no answers, next job posting) must go through /dev/tty instead,
+# which always points to the user's actual terminal regardless of stdin state.
+
+def _tty_confirm(prompt):
+    """Ask a yes/no question; return True if the user answers y/Y."""
+    print(f"\n{prompt} (y/n): ", end="", flush=True)
+    try:
+        with open("/dev/tty") as tty:
+            answer = tty.readline().strip().lower()
+    except OSError:
+        answer = input().strip().lower()
+    return answer == "y"
+
+def _tty_read_job_posting():
+    """Read a job posting URL or pasted text from the terminal."""
+    print("Enter a job posting URL, or paste the full job description.")
+    print("Press Ctrl+D when done (Mac/Linux) or Ctrl+Z then Enter (Windows):")
+    try:
+        with open("/dev/tty") as tty:
+            return tty.read().strip()
+    except OSError:
+        return sys.stdin.read().strip()
+
+
+# ==============================================================================
+# ENTRY POINT
 # ==============================================================================
 # This special line means: "only run the code below if this file is being
 # run directly (python agent_loop.py), not if it's being imported by some
@@ -214,43 +256,71 @@ def run_agent(user_message):
 # "this is where the program starts."
 if __name__ == "__main__":
 
-    # Ask for a job posting URL or pasted text. We use sys.stdin.read() instead
-    # of the simpler input() because input() only grabs ONE line - if you paste
-    # a whole job posting (many lines), input() would cut it off after the first.
+    # The outer loop lets the user process multiple job postings back-to-back
+    # without restarting the script. Each iteration is one full job evaluation.
     #
-    # sys.stdin.read() keeps reading everything you paste/type until it sees an
-    # "EOF" signal, which you send by pressing Ctrl+D on Mac/Linux (or Ctrl+Z
-    # then Enter on Windows) once you're done.
-    #
-    # Two ways to provide the job posting:
-    #   - Paste a URL (e.g. a LinkedIn job link) and press Ctrl+D. Claude will
-    #     call the fetch_job_posting tool to retrieve the description for you.
-    #   - Paste the full job description text directly and press Ctrl+D. Claude
-    #     will use it as-is. It's fine if the pasted text is messy - extra blank
-    #     lines, "Apply Now" buttons, nav text, etc. - Claude ignores the noise.
-    print("Enter a job posting URL, or paste the full job description.")
-    print("Press Ctrl+D when done (Mac/Linux) or Ctrl+Z then Enter (Windows):")
-    user_input = sys.stdin.read().strip()
+    # The very first posting reads from sys.stdin (so the user can pipe input
+    # or paste freely). Every subsequent posting and all yes/no prompts use
+    # /dev/tty via the helpers above, since stdin is exhausted after the first
+    # Ctrl+D.
+    first_run = True
 
-    # Detect whether the user gave us a URL or raw text, and build the
-    # appropriate prompt so Claude knows what to do with the input.
-    if user_input.startswith(("http://", "https://")):
-        prompt = f"""
-Fetch the job posting from this URL and then evaluate my fit and tailor my
-application materials for this specific role, exactly as instructed.
+    while True:
 
-URL: {user_input}
-"""
-    else:
-        prompt = f"""
-Here is a job posting:
+        # ── Get job posting ────────────────────────────────────────────────
+        if first_run:
+            print("Enter a job posting URL, or paste the full job description.")
+            print("Press Ctrl+D when done (Mac/Linux) or Ctrl+Z then Enter (Windows):")
+            user_input = sys.stdin.read().strip()
+            first_run = False
+        else:
+            print()
+            user_input = _tty_read_job_posting()
 
-{user_input}
+        # Detect whether the user gave us a URL or raw text, and build the
+        # appropriate prompt so Claude knows what to do with the input.
+        if user_input.startswith(("http://", "https://")):
+            prompt = (
+                "Fetch the job posting from this URL and then evaluate my fit, "
+                "exactly as instructed.\n\nURL: " + user_input
+            )
+        else:
+            prompt = (
+                "Here is a job posting:\n\n"
+                + user_input
+                + "\n\nEvaluate my fit exactly as instructed."
+            )
 
-Evaluate my fit and tailor my application materials for this specific role,
-exactly as instructed.
-"""
+        # ── Phase 1: match score + key gaps ───────────────────────────────
+        print()
+        elapsed, phase1_text, messages = run_agent(prompt, system=SYSTEM_PHASE_1)
 
-    # Call our agent loop with that instruction, and print whatever it
-    # eventually returns.
-    print(run_agent(prompt))
+        print("\n" + "-" * 72)
+        print(phase1_text)
+        print("-" * 72)
+        print(f"Done in {elapsed:.1f}s")
+
+        # ── Gate: ask before spending tokens on adjustments + cover letter ─
+        if not _tty_confirm("Generate resume adjustments and cover letter?"):
+            if not _tty_confirm("Process another job posting?"):
+                break
+            continue
+
+        # ── Phase 2: resume adjustments + tailored cover letter ───────────
+        # We pass the messages history from phase 1 so Claude already has
+        # the resume and job posting in context - no file re-reads needed.
+        print()
+        elapsed2, phase2_text, _ = run_agent(
+            "Now generate the resume adjustments and tailored cover letter as instructed.",
+            system=SYSTEM_PHASE_2,
+            messages=messages,
+        )
+
+        print("\n" + "-" * 72)
+        print(phase2_text)
+        print("-" * 72)
+        print(f"Done in {elapsed2:.1f}s")
+
+        # ── Loop: offer to process another posting ─────────────────────────
+        if not _tty_confirm("Process another job posting?"):
+            break

@@ -8,7 +8,7 @@ fit against a job posting, and drafts a tailored cover letter using Claude.
 1. Install dependencies:
 
    ```
-   pip3 install anthropic pypdf python-dotenv
+   pip3 install anthropic pypdf python-dotenv requests beautifulsoup4
    ```
 
 2. Copy `.env.example` to `.env` and add your Anthropic API key:

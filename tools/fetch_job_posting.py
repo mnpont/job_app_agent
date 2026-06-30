@@ -24,15 +24,8 @@ How this tool works:
                       This guarantees Claude always gets the content it needs,
                       even on pages that actively block scraping.
 
-Optional: set JINA_API_KEY in your .env file to use an authenticated Jina
-request (higher rate limits). The tool works without it.
-
-Required packages (add to your pip install):
-    requests
-    beautifulsoup4
 """
 
-import os
 import sys
 
 import requests
@@ -63,14 +56,8 @@ def _fetch_via_jina(url):
     """
     Ask Jina Reader (r.jina.ai) to fetch and render the page for us.
     Jina handles JavaScript-rendered pages like LinkedIn, returning plain text.
-    If JINA_API_KEY is set in the environment, it's sent as a Bearer token
-    for authenticated access (higher rate limits).
     """
-    headers = {"Accept": "text/plain"}
-    api_key = os.environ.get("JINA_API_KEY")
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    resp = requests.get(f"https://r.jina.ai/{url}", headers=headers, timeout=20)
+    resp = requests.get(f"https://r.jina.ai/{url}", headers={"Accept": "text/plain"}, timeout=20)
     resp.raise_for_status()
     return resp.text
 
